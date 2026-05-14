@@ -13,6 +13,7 @@ QED_DEFAULT_ERROR: float = 1.0e-8
 QED_DEFAULT_ETAINVSTEP: float = 0.1
 QED_DEFAULT_NMAXSTEP: int = 5
 QED_DEFAULT_NMAX_CONVERGENCE: float = 1.0e-7
+QED_DEFAULT_MAX_NMAX: int = 200
 
 
 def ak(k: float, v: float) -> float:
@@ -71,6 +72,7 @@ class QedCoef:
     _last_j: Optional[float] = None
     _last_eta: Optional[float] = None
     _last_n_max: Optional[int] = None
+    _last_dtype: Optional[mx.Dtype] = None
     _rj: float
     _rbarj: float
     _rest_cj: float
@@ -78,14 +80,14 @@ class QedCoef:
     log: bool = False
 
     def __init__(self) -> None:
-        self._grid = Grid(no_zero=True)
+        self._grid = Grid(no_zero=True, dtype=mx.float32)
 
     @staticmethod
     @mx.compile
     def _sum_kernel_rest(
         n_norm: mx.array,
-        j: float,
-        eta: float,
+        j: mx.array,
+        eta: mx.array,
     ) -> mx.array:
         """MLX kernel for the rest-frame sum"""
         t = mx.tanh(mx.sinh(eta * n_norm)) ** (j + 2.0)
@@ -97,9 +99,9 @@ class QedCoef:
         n_norm: mx.array,
         n_hat: mx.array,
         v: mx.array,
-        j: float,
-        eta: float,
-        a: float,
+        j: mx.array,
+        eta: mx.array,
+        a: mx.array,
     ) -> mx.array:
         """MLX kernel for the rest-frame/moving-frame residual sum"""
         p = j + 2.0
@@ -118,6 +120,7 @@ class QedCoef:
         n_max: int,
         n_norm: mx.array,
         *,
+        dtype: mx.Dtype,
         device: mx.DeviceType,
     ) -> None:
         """
@@ -130,6 +133,8 @@ class QedCoef:
             or self._last_eta is None
             or eta != self._last_eta
             or n_max != self._last_n_max
+            or self._last_dtype is None
+            or dtype != self._last_dtype
         )
 
         # refresh R_j and Rbar_j if j changed
@@ -150,19 +155,22 @@ class QedCoef:
         # refresh c_j(0) and j/eta/n_max changed
         if refresh_rest:
             with mx.stream(mx.Device(device)):
+                j_kernel = mx.array(j, dtype=dtype)
+                eta_kernel = mx.array(eta, dtype=dtype)
                 # use more stable reflection formula [1, Eq. (70)] for j < 0
                 if j < 0.0:
                     jp = 3.0 - j
-                    s0 = self._sum_kernel_rest(n_norm, jp, eta).item()
+                    jp_kernel = mx.array(jp, dtype=dtype)
+                    s0 = self._sum_kernel_rest(n_norm, jp_kernel, eta_kernel).item()
                     c0p = s0 + 4.0 * math.pi * eta ** (jp - 3.0) * self._rbarj
                     self._rest_cj = self._reflect_cj(j, c0p)
                 # use [2, Eq. (A25)] for j < 3
                 elif j < 3.0:
-                    s0 = self._sum_kernel_rest(n_norm, j, eta).item()
+                    s0 = self._sum_kernel_rest(n_norm, j_kernel, eta_kernel).item()
                     self._rest_cj = s0 - 4.0 * math.pi * eta ** (j - 3.0) * self._rj
                 # use [2, Eq. (A33)] for j > 3
                 elif j > 3.0:
-                    s0 = self._sum_kernel_rest(n_norm, j, eta).item()
+                    s0 = self._sum_kernel_rest(n_norm, j_kernel, eta_kernel).item()
                     self._rest_cj = s0 + 4.0 * math.pi * eta ** (j - 3.0) * self._rbarj
                 else:
                     raise RuntimeError("not implemented")
@@ -172,6 +180,7 @@ class QedCoef:
         if refresh_rest:
             self._last_eta = eta
             self._last_n_max = n_max
+            self._last_dtype = dtype
 
     @staticmethod
     def _reflect_cj(j: float, c_3_minus_j: float) -> float:
@@ -201,7 +210,9 @@ class QedCoef:
         step: AccelerationParameters = AccelerationParameters(
             n_max=QED_DEFAULT_NMAXSTEP, eta=QED_DEFAULT_ETAINVSTEP
         ),
+        max_n_max: int = QED_DEFAULT_MAX_NMAX,
         device: mx.DeviceType,
+        dtype: mx.Dtype = mx.float32,
     ) -> AccelerationParameters:
         """
         Tune the acceleration parameters for the computation of `c_j(v)`.
@@ -213,10 +224,12 @@ class QedCoef:
         inner_tol = max(1.0e-2 * QED_DEFAULT_ERROR, QED_DEFAULT_NMAX_CONVERGENCE)
 
         def converge(par: AccelerationParameters) -> float:
-            previous = self(j, v, par, device=device)
+            previous = self(j, v, par, device=device, dtype=dtype)
             while True:
                 par.n_max += step.n_max
-                buf = self(j, v, par, device=device)
+                if par.n_max > max_n_max:
+                    raise RuntimeError(f"maximum n_max {max_n_max} exceeded")
+                buf = self(j, v, par, device=device, dtype=dtype)
                 res = abs(buf - previous) / (0.5 * (abs(buf) + abs(previous)))
                 previous = buf
                 if res <= inner_tol:
@@ -246,23 +259,32 @@ class QedCoef:
         par: Optional[AccelerationParameters] = None,
         *,
         device: mx.DeviceType,
+        dtype: mx.Dtype = mx.float32,
     ) -> float:
         """Compute `c_j(v)`"""
         if par is None:
             raise RuntimeError("not implemented")
+        if dtype not in (mx.float32, mx.float64):
+            raise RuntimeError(f"unsupported dtype {dtype}")
+        if dtype == mx.float64 and device != mx.cpu:
+            raise RuntimeError("float64 is only supported on CPU")
 
         with mx.stream(mx.Device(device)):
             # evaluate |v| in FP64 to avoid rounding issues in functions of |v|
             beta = self._v_fp64(v)
-            v_mlx = mx.array(np.asarray(v, dtype=np.float32))
+            v_dtype = np.float64 if dtype == mx.float64 else np.float32
+            v_mlx = mx.array(np.asarray(v, dtype=v_dtype), dtype=dtype)
 
             # set the momentum lattice
+            self._grid.dtype = dtype
             self._grid.n_max = par.n_max
             n_norm = self._grid.n_norm
             n_hat = self._grid.n_hat
 
             # compute & cache R_j, Rbar_j, and c_j(0) as needed
-            self._refresh_cache(j, par.eta, par.n_max, n_norm, device=device)
+            self._refresh_cache(
+                j, par.eta, par.n_max, n_norm, dtype=dtype, device=device
+            )
 
             # compute A_{5/(j+2)}(|v|)
             k = 5.0 / (j + 2.0)
@@ -272,7 +294,12 @@ class QedCoef:
             if beta == 0.0:
                 s = 0.0
             else:
-                s = self._residual_kernel(n_norm, n_hat, v_mlx, j, par.eta, a).item()
+                j_kernel = mx.array(j, dtype=dtype)
+                eta_kernel = mx.array(par.eta, dtype=dtype)
+                a_kernel = mx.array(a, dtype=dtype)
+                s = self._residual_kernel(
+                    n_norm, n_hat, v_mlx, j_kernel, eta_kernel, a_kernel
+                ).item()
             if j != 3.0:
                 return s + a * self._rest_cj
             else:

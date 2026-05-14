@@ -5,6 +5,7 @@ class Grid:
     _n_min: int = -1
     _n_max: int = -1
     _nd: int = -1
+    _dtype: mx.Dtype
     _no_zero: bool
     _grid: mx.array
     _n_norm: mx.array
@@ -41,6 +42,16 @@ class Grid:
             self._make_grid()
 
     @property
+    def dtype(self) -> mx.Dtype:
+        return self._dtype
+
+    @dtype.setter
+    def dtype(self, new_dtype: mx.Dtype) -> None:
+        if new_dtype != self.dtype:
+            self._dtype = new_dtype
+            self._make_grid()
+
+    @property
     def grid(self) -> mx.array:
         return self._grid
 
@@ -53,11 +64,18 @@ class Grid:
         return self._n_hat
 
     def __init__(
-        self, *, n_min: int = 0, n_max: int = 0, no_zero: bool = False, nd: int = 3
+        self,
+        *,
+        n_min: int = 0,
+        n_max: int = 0,
+        no_zero: bool = False,
+        nd: int = 3,
+        dtype: mx.Dtype = mx.float32,
     ) -> None:
         self._nd = nd
         self._n_min = n_min
         self._n_max = n_max
+        self._dtype = dtype
         self._no_zero = no_zero
         self._make_grid()
 
@@ -79,8 +97,10 @@ class Grid:
         buf = mx.stack([*xj], axis=-1).reshape(-1, self.nd)
         if self._no_zero and self.n_min == 0:
             mid = buf.shape[0] // 2
-            self._grid = mx.concatenate([buf[:mid], buf[mid + 1 :]], axis=0)
+            self._grid = mx.concatenate([buf[:mid], buf[mid + 1 :]], axis=0).astype(
+                self.dtype
+            )
         else:
-            self._grid = buf
+            self._grid = buf.astype(self.dtype)
         self._n_norm = mx.linalg.norm(self._grid, axis=1)
         self._n_hat = self._grid / self._n_norm.reshape(-1, 1)
