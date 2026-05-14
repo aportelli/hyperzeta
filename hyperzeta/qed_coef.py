@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 from typing import Optional
 
 import mlx.core as mx
@@ -7,6 +8,11 @@ from numpy.typing import ArrayLike
 from scipy.integrate import quad
 
 from hyperzeta.grid import Grid
+
+QED_DEFAULT_ERROR: float = 1.0e-8
+QED_DEFAULT_ETAINVSTEP: float = 0.1
+QED_DEFAULT_NMAXSTEP: int = 5
+QED_DEFAULT_NMAX_CONVERGENCE: float = 1.0e-7
 
 
 def ak(k: float, v: float) -> float:
@@ -45,6 +51,12 @@ def _rbarj(j: float) -> float:
     return result
 
 
+@dataclass
+class AccelerationParameters:
+    n_max: int = -1
+    eta: float = -1
+
+
 class QedCoef:
     """
     Class computing the $c_j(v)$ QED finite-volume coefficients described in [1,2]
@@ -62,6 +74,8 @@ class QedCoef:
     _rj: float
     _rbarj: float
     _rest_cj: float
+
+    log: bool = False
 
     def __init__(self) -> None:
         self._grid = Grid(no_zero=True)
@@ -161,7 +175,7 @@ class QedCoef:
 
     @staticmethod
     def _reflect_cj(j: float, c_3_minus_j: float) -> float:
-        """reflection formula [1, Eq. (70)]"""
+        """Reflection formula [1, Eq. (70)]"""
         return (
             math.pi ** (j - 1.5)
             * math.gamma((3.0 - j) / 2.0)
@@ -173,17 +187,68 @@ class QedCoef:
     def _v_fp64(v: ArrayLike) -> float:
         return float(np.linalg.norm(np.asarray(v, dtype=np.float64)))
 
+    def _log(self, msg: str):
+        if self.log:
+            print(f"[{self.__class__.__name__}] {msg}")
+
+    def tune(
+        self,
+        j: float,
+        v: ArrayLike = np.zeros(3),
+        residual: float = QED_DEFAULT_ERROR,
+        *,
+        init_par: AccelerationParameters = AccelerationParameters(n_max=5, eta=1.0),
+        step: AccelerationParameters = AccelerationParameters(
+            n_max=QED_DEFAULT_NMAXSTEP, eta=QED_DEFAULT_ETAINVSTEP
+        ),
+        device: mx.DeviceType,
+    ) -> AccelerationParameters:
+        """
+        Tune the acceleration parameters for the computation of `c_j(v)`.
+
+        `step.eta` is an additive step in `1 / eta`, i.e. the update is
+        `1 / eta_new = 1 / eta_old + step.eta`.
+        """
+        par = AccelerationParameters(n_max=init_par.n_max, eta=init_par.eta)
+        inner_tol = max(1.0e-2 * QED_DEFAULT_ERROR, QED_DEFAULT_NMAX_CONVERGENCE)
+
+        def converge(par: AccelerationParameters) -> float:
+            previous = self(j, v, par, device=device)
+            while True:
+                par.n_max += step.n_max
+                buf = self(j, v, par, device=device)
+                res = abs(buf - previous) / (0.5 * (abs(buf) + abs(previous)))
+                previous = buf
+                if res <= inner_tol:
+                    return previous
+
+        previous = converge(par)
+        self._log(f"eta= {par.eta:.4f} nmax= {par.n_max} c_j={previous:.15e}")
+        while True:
+            par.eta = par.eta / (1.0 + step.eta * par.eta)
+            par.n_max = par.n_max - 10 if par.n_max > 10 else par.n_max
+            buf = converge(par)
+            res = abs(buf - previous) / (0.5 * (abs(buf) + abs(previous)))
+            res /= math.expm1(step.eta)
+            previous = buf
+            self._log(
+                f"eta= {par.eta:.4f} nmax= {par.n_max} c_j={previous:.15e} residual= {res:.2e}",
+            )
+            if res <= residual:
+                break
+
+        return par
+
     def __call__(
         self,
         j: float,
         v: ArrayLike = np.zeros(3),
-        n_max: Optional[int] = None,
-        eta: Optional[float] = None,
+        par: Optional[AccelerationParameters] = None,
         *,
         device: mx.DeviceType,
     ) -> float:
-        """Compute c_j(v)"""
-        if n_max is None or eta is None:
+        """Compute `c_j(v)`"""
+        if par is None:
             raise RuntimeError("not implemented")
 
         with mx.stream(mx.Device(device)):
@@ -192,12 +257,12 @@ class QedCoef:
             v_mlx = mx.array(np.asarray(v, dtype=np.float32))
 
             # set the momentum lattice
-            self._grid.n_max = n_max
+            self._grid.n_max = par.n_max
             n_norm = self._grid.n_norm
             n_hat = self._grid.n_hat
 
             # compute & cache R_j, Rbar_j, and c_j(0) as needed
-            self._refresh_cache(j, eta, n_max, n_norm, device=device)
+            self._refresh_cache(j, par.eta, par.n_max, n_norm, device=device)
 
             # compute A_{5/(j+2)}(|v|)
             k = 5.0 / (j + 2.0)
@@ -207,7 +272,7 @@ class QedCoef:
             if beta == 0.0:
                 s = 0.0
             else:
-                s = self._residual_kernel(n_norm, n_hat, v_mlx, j, eta, a).item()
+                s = self._residual_kernel(n_norm, n_hat, v_mlx, j, par.eta, a).item()
             if j != 3.0:
                 return s + a * self._rest_cj
             else:
