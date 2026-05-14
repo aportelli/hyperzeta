@@ -91,7 +91,7 @@ class QedCoef:
         p = j + 2.0
         ndv = n_hat @ v
         d = 1.0 / (1.0 - ndv)
-        tv = mx.tanh(mx.sinh(eta * n_norm * d ** (1.0 / p))) ** p
+        tv = mx.tanh(mx.sinh(eta * n_norm * d ** (-1.0 / p))) ** p
         t0 = mx.tanh(mx.sinh(eta * n_norm)) ** p
         term_v = (1.0 - tv) * d / (n_norm**j)
         term_0 = (1.0 - t0) / (n_norm**j)
