@@ -10,10 +10,9 @@ from scipy.integrate import quad
 
 from hyperzeta.grid import Grid
 
-QED_DEFAULT_ERROR: float = 1.0e-8
+QED_DEFAULT_ERROR: float = 1.0e-4
 QED_DEFAULT_ETAINVSTEP: float = 0.1
 QED_DEFAULT_NMAXSTEP: int = 5
-QED_DEFAULT_NMAX_CONVERGENCE: float = 1.0e-7
 QED_DEFAULT_MAX_NMAX: int = 200
 
 
@@ -346,7 +345,10 @@ class QedCoef:
         """
         n_threads = self._validate_execution_options(device, dtype, n_threads)
         par = AccelerationParameters(n_max=init_par.n_max, eta=init_par.eta)
-        inner_tol = max(1.0e-2 * QED_DEFAULT_ERROR, QED_DEFAULT_NMAX_CONVERGENCE)
+        if dtype == mx.float32:
+            inner_tol = max(1.0e-2 * residual, 1.0e-7)
+        else:
+            inner_tol = max(1.0e-2 * residual, 1.0e-14)
 
         def converge(par: AccelerationParameters) -> float:
             previous = self(j, v, par, device=device, dtype=dtype, n_threads=n_threads)
@@ -388,9 +390,9 @@ class QedCoef:
         n_threads: int = 1,
     ) -> float:
         """Compute `c_j(v)`"""
-        if par is None:
-            raise RuntimeError("not implemented")
         n_threads = self._validate_execution_options(device, dtype, n_threads)
+        if par is None:
+            par = self.tune(j, v, device=device, dtype=dtype)
 
         with mx.stream(mx.Device(device)):
             beta = self._v_fp64(v)
