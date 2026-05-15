@@ -103,4 +103,8 @@ class Grid:
         else:
             self._grid = buf.astype(self.dtype)
         self._n_norm = mx.linalg.norm(self._grid, axis=1)
-        self._n_hat = self._grid / self._n_norm.reshape(-1, 1)
+        self._n_hat = mx.where(
+            self._n_norm.reshape(-1, 1) == 0,
+            mx.zeros_like(self._grid),
+            self._grid / self._n_norm.reshape(-1, 1),
+        )

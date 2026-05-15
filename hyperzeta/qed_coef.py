@@ -1,6 +1,7 @@
 import math
+import warnings
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Dict, List, Optional
 
 import mlx.core as mx
 import numpy as np
@@ -17,8 +18,8 @@ QED_DEFAULT_MAX_NMAX: int = 200
 
 
 def ak(k: float, v: float) -> float:
-    if v < 0.0:
-        raise RuntimeError(f"v must be positive (got {v})")
+    if not (0.0 <= v < 1.0):
+        raise ValueError(f"|v| must satisfy 0 <= |v| < 1 (got {v})")
     if v == 0.0:
         return 1.0
     eps = k - 1.0
@@ -76,11 +77,13 @@ class QedCoef:
     _rj: float
     _rbarj: float
     _rest_cj: float
+    _streams: Dict[mx.DeviceType, List[mx.Stream]]
 
     log: bool = False
 
     def __init__(self) -> None:
         self._grid = Grid(no_zero=True, dtype=mx.float32)
+        self._streams = {}
 
     @staticmethod
     @mx.compile
@@ -118,10 +121,10 @@ class QedCoef:
         j: float,
         eta: float,
         n_max: int,
-        n_norm: mx.array,
         *,
         dtype: mx.Dtype,
         device: mx.DeviceType,
+        n_threads: int = 1,
     ) -> None:
         """
         Function caching `R_j` [2, Eq. (A26)], `Rbar_j` [2, Eq. (A33)], and `c_j(0)`
@@ -152,28 +155,10 @@ class QedCoef:
                 self._rj = 0.0
                 self._rbarj = 0.0
 
-        # refresh c_j(0) and j/eta/n_max changed
         if refresh_rest:
-            with mx.stream(mx.Device(device)):
-                j_kernel = mx.array(j, dtype=dtype)
-                eta_kernel = mx.array(eta, dtype=dtype)
-                # use more stable reflection formula [1, Eq. (70)] for j < 0
-                if j < 0.0:
-                    jp = 3.0 - j
-                    jp_kernel = mx.array(jp, dtype=dtype)
-                    s0 = self._sum_kernel_rest(n_norm, jp_kernel, eta_kernel).item()
-                    c0p = s0 + 4.0 * math.pi * eta ** (jp - 3.0) * self._rbarj
-                    self._rest_cj = self._reflect_cj(j, c0p)
-                # use [2, Eq. (A25)] for j < 3
-                elif j < 3.0:
-                    s0 = self._sum_kernel_rest(n_norm, j_kernel, eta_kernel).item()
-                    self._rest_cj = s0 - 4.0 * math.pi * eta ** (j - 3.0) * self._rj
-                # use [2, Eq. (A33)] for j > 3
-                elif j > 3.0:
-                    s0 = self._sum_kernel_rest(n_norm, j_kernel, eta_kernel).item()
-                    self._rest_cj = s0 + 4.0 * math.pi * eta ** (j - 3.0) * self._rbarj
-                else:
-                    raise RuntimeError("not implemented")
+            self._rest_cj = self._compute_rest(
+                j, eta, dtype=dtype, device=device, n_threads=n_threads
+            )
 
         if refresh_j:
             self._last_j = j
@@ -181,6 +166,51 @@ class QedCoef:
             self._last_eta = eta
             self._last_n_max = n_max
             self._last_dtype = dtype
+
+    def _compute_rest(
+        self,
+        j: float,
+        eta: float,
+        *,
+        dtype: mx.Dtype,
+        device: mx.DeviceType,
+        n_threads: int,
+    ) -> float:
+        with mx.stream(mx.Device(device)):
+            # use more stable reflection formula [1, Eq. (70)] for j < 0
+            if j < 0.0:
+                jp = 3.0 - j
+                s0 = self._eval_rest_sum(
+                    jp,
+                    eta,
+                    dtype=dtype,
+                    device=device,
+                    n_threads=n_threads,
+                )
+                c0p = s0 + 4.0 * math.pi * eta ** (jp - 3.0) * self._rbarj
+                return self._reflect_cj(j, c0p)
+            # use [2, Eq. (A25)] for j < 3
+            elif j < 3.0:
+                s0 = self._eval_rest_sum(
+                    j,
+                    eta,
+                    dtype=dtype,
+                    device=device,
+                    n_threads=n_threads,
+                )
+                return s0 - 4.0 * math.pi * eta ** (j - 3.0) * self._rj
+            # use [2, Eq. (A33)] for j > 3
+            elif j > 3.0:
+                s0 = self._eval_rest_sum(
+                    j,
+                    eta,
+                    dtype=dtype,
+                    device=device,
+                    n_threads=n_threads,
+                )
+                return s0 + 4.0 * math.pi * eta ** (j - 3.0) * self._rbarj
+            else:
+                raise RuntimeError("not implemented")
 
     @staticmethod
     def _reflect_cj(j: float, c_3_minus_j: float) -> float:
@@ -200,6 +230,99 @@ class QedCoef:
         if self.log:
             print(f"[{self.__class__.__name__}] {msg}")
 
+    @staticmethod
+    def _validate_execution_options(
+        device: mx.DeviceType, dtype: mx.Dtype, n_threads: int
+    ) -> int:
+        if dtype not in (mx.float32, mx.float64):
+            raise RuntimeError(f"unsupported dtype {dtype}")
+        if dtype == mx.float64 and device != mx.cpu:
+            raise RuntimeError("float64 is only supported on CPU")
+        if device == mx.gpu and n_threads > 1:
+            warnings.warn(
+                "multiple threads is neither useful nor stable with GPU, reverting to n_threads = 1",
+                RuntimeWarning,
+            )
+            return 1
+        return n_threads
+
+    def _eval_chunked(
+        self,
+        n_items: int,
+        kernel: Callable[[int, int], mx.array],
+        *,
+        device: mx.DeviceType,
+        n_threads: int,
+    ) -> float:
+        if n_threads <= 1:
+            return kernel(0, n_items).item()
+
+        step = math.ceil(n_items / n_threads)
+        chunks = [(i, min(i + step, n_items)) for i in range(0, n_items, step)]
+        streams = self._streams.setdefault(device, [])
+        dev = mx.Device(device)
+        while len(streams) < len(chunks):
+            streams.append(mx.new_stream(dev))
+        streams = streams[: len(chunks)]
+        partials = []
+
+        for stream, (lo, hi) in zip(streams, chunks):
+            with mx.stream(stream):
+                part = kernel(lo, hi)
+                mx.async_eval(part)
+                partials.append(part)
+
+        for stream in streams:
+            mx.synchronize(stream)
+
+        return sum(part.item() for part in partials)
+
+    def _eval_rest_sum(
+        self,
+        j: float,
+        eta: float,
+        *,
+        dtype: mx.Dtype,
+        device: mx.DeviceType,
+        n_threads: int,
+    ) -> float:
+        n_norm = self._grid.n_norm
+        j_mx = mx.array(j, dtype=dtype)
+        eta_mx = mx.array(eta, dtype=dtype)
+        return self._eval_chunked(
+            n_norm.shape[0],
+            lambda lo, hi: self._sum_kernel_rest(n_norm[lo:hi], j_mx, eta_mx),
+            device=device,
+            n_threads=n_threads,
+        )
+
+    def _eval_residual_sum(
+        self,
+        v_raw: ArrayLike,
+        j: float,
+        eta: float,
+        a: float,
+        *,
+        dtype: mx.Dtype,
+        device: mx.DeviceType,
+        n_threads: int,
+    ) -> float:
+        n_norm = self._grid.n_norm
+        n_hat = self._grid.n_hat
+        v_dtype = np.float64 if dtype == mx.float64 else np.float32
+        v = mx.array(np.asarray(v_raw, dtype=v_dtype), dtype=dtype)
+        j_mx = mx.array(j, dtype=dtype)
+        eta_mx = mx.array(eta, dtype=dtype)
+        a_mx = mx.array(a, dtype=v.dtype)
+        return self._eval_chunked(
+            n_norm.shape[0],
+            lambda lo, hi: self._residual_kernel(
+                n_norm[lo:hi], n_hat[lo:hi], v, j_mx, eta_mx, a_mx
+            ),
+            device=device,
+            n_threads=n_threads,
+        )
+
     def tune(
         self,
         j: float,
@@ -213,6 +336,7 @@ class QedCoef:
         max_n_max: int = QED_DEFAULT_MAX_NMAX,
         device: mx.DeviceType,
         dtype: mx.Dtype = mx.float32,
+        n_threads: int = 1,
     ) -> AccelerationParameters:
         """
         Tune the acceleration parameters for the computation of `c_j(v)`.
@@ -220,16 +344,17 @@ class QedCoef:
         `step.eta` is an additive step in `1 / eta`, i.e. the update is
         `1 / eta_new = 1 / eta_old + step.eta`.
         """
+        n_threads = self._validate_execution_options(device, dtype, n_threads)
         par = AccelerationParameters(n_max=init_par.n_max, eta=init_par.eta)
         inner_tol = max(1.0e-2 * QED_DEFAULT_ERROR, QED_DEFAULT_NMAX_CONVERGENCE)
 
         def converge(par: AccelerationParameters) -> float:
-            previous = self(j, v, par, device=device, dtype=dtype)
+            previous = self(j, v, par, device=device, dtype=dtype, n_threads=n_threads)
             while True:
                 par.n_max += step.n_max
                 if par.n_max > max_n_max:
                     raise RuntimeError(f"maximum n_max {max_n_max} exceeded")
-                buf = self(j, v, par, device=device, dtype=dtype)
+                buf = self(j, v, par, device=device, dtype=dtype, n_threads=n_threads)
                 res = abs(buf - previous) / (0.5 * (abs(buf) + abs(previous)))
                 previous = buf
                 if res <= inner_tol:
@@ -260,46 +385,39 @@ class QedCoef:
         *,
         device: mx.DeviceType,
         dtype: mx.Dtype = mx.float32,
+        n_threads: int = 1,
     ) -> float:
         """Compute `c_j(v)`"""
         if par is None:
             raise RuntimeError("not implemented")
-        if dtype not in (mx.float32, mx.float64):
-            raise RuntimeError(f"unsupported dtype {dtype}")
-        if dtype == mx.float64 and device != mx.cpu:
-            raise RuntimeError("float64 is only supported on CPU")
+        n_threads = self._validate_execution_options(device, dtype, n_threads)
 
         with mx.stream(mx.Device(device)):
-            # evaluate |v| in FP64 to avoid rounding issues in functions of |v|
             beta = self._v_fp64(v)
-            v_dtype = np.float64 if dtype == mx.float64 else np.float32
-            v_mlx = mx.array(np.asarray(v, dtype=v_dtype), dtype=dtype)
+            if not (0.0 <= beta < 1.0):
+                raise ValueError(f"|v| must satisfy 0 <= |v| < 1 (got {beta})")
 
             # set the momentum lattice
             self._grid.dtype = dtype
             self._grid.n_max = par.n_max
-            n_norm = self._grid.n_norm
-            n_hat = self._grid.n_hat
 
             # compute & cache R_j, Rbar_j, and c_j(0) as needed
             self._refresh_cache(
-                j, par.eta, par.n_max, n_norm, dtype=dtype, device=device
+                j, par.eta, par.n_max, dtype=dtype, device=device, n_threads=n_threads
             )
-
-            # compute A_{5/(j+2)}(|v|)
-            k = 5.0 / (j + 2.0)
-            a = ak(k, beta)
 
             # compute c_j(v) - c_j(0) if required
             if beta == 0.0:
                 s = 0.0
+                a = 1.0
             else:
-                j_kernel = mx.array(j, dtype=dtype)
-                eta_kernel = mx.array(par.eta, dtype=dtype)
-                a_kernel = mx.array(a, dtype=dtype)
-                s = self._residual_kernel(
-                    n_norm, n_hat, v_mlx, j_kernel, eta_kernel, a_kernel
-                ).item()
+                # compute A_{5/(j+2)}(|v|)
+                k = 5.0 / (j + 2.0)
+                a = ak(k, beta)
+                # compute residual sum
+                s = self._eval_residual_sum(
+                    v, j, par.eta, a, dtype=dtype, device=device, n_threads=n_threads
+                )
             if j != 3.0:
                 return s + a * self._rest_cj
             else:
