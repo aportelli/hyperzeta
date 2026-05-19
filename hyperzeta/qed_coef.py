@@ -17,6 +17,7 @@ QED_DEFAULT_MAX_NMAX: int = 200
 
 
 def ak(k: float, v: float) -> float:
+    """Return the angular factor `A_k(|v|)` [2, Eqs. (A16) & (A17)]."""
     if not (0.0 <= v < 1.0):
         raise ValueError(f"|v| must satisfy 0 <= |v| < 1 (got {v})")
     if v == 0.0:
@@ -30,6 +31,7 @@ def ak(k: float, v: float) -> float:
 
 
 def _tanhsinh(r: float) -> float:
+    """Evaluate tanh(sinh(r)) with a conservative large-r shortcut to avoid overflow."""
     if r > 40.0:
         return 1.0
     else:
@@ -37,6 +39,8 @@ def _tanhsinh(r: float) -> float:
 
 
 def _rj(j: float) -> float:
+    """Compute the integral `R_j` [2, Eq. (A26)]."""
+
     def f(r: float) -> float:
         return (1.0 - _tanhsinh(r) ** (j + 2.0)) / (r ** (j - 2.0))
 
@@ -45,6 +49,8 @@ def _rj(j: float) -> float:
 
 
 def _rbarj(j: float) -> float:
+    """Compute the integral `Rbar_j` [2, Eq. (A33)]."""
+
     def f(r: float) -> float:
         return _tanhsinh(r) ** (j + 2.0) / (r ** (j - 2.0))
 
@@ -54,13 +60,15 @@ def _rbarj(j: float) -> float:
 
 @dataclass
 class AccelerationParameters:
+    """Acceleration parameters controlling the regulator and momentum lattice cutoff."""
+
     n_max: int = -1
     eta: float = -1
 
 
 class QedCoef:
     """
-    Class computing the $c_j(v)$ QED finite-volume coefficients described in [1,2]
+    Class computing the `c_j(v)` QED finite-volume coefficients described in [1,2]
 
     References
     ----------
@@ -125,10 +133,7 @@ class QedCoef:
         device: mx.DeviceType,
         n_threads: int = 1,
     ) -> None:
-        """
-        Function caching `R_j` [2, Eq. (A26)], `Rbar_j` [2, Eq. (A33)], and `c_j(0)`
-        (using [2, Eqs. (A25) & (A32)]).
-        """
+        """Refresh cached integrals and the rest-frame coefficient as needed."""
         refresh_j = self._last_j is None or j != self._last_j
         refresh_rest = (
             refresh_j
@@ -175,6 +180,7 @@ class QedCoef:
         device: mx.DeviceType,
         n_threads: int,
     ) -> float:
+        """Compute the cached rest-frame coefficient `c_j(0)` for the current settings."""
         with mx.stream(mx.Device(device)):
             # use more stable reflection formula [1, Eq. (70)] for j < 0
             if j < 0.0:
@@ -223,6 +229,7 @@ class QedCoef:
 
     @staticmethod
     def _v_fp64(v: ArrayLike) -> float:
+        """Compute |v| in FP64 to avoid instabilities in angular part."""
         return float(np.linalg.norm(np.asarray(v, dtype=np.float64)))
 
     def _log(self, msg: str):
@@ -233,6 +240,7 @@ class QedCoef:
     def _validate_execution_options(
         device: mx.DeviceType, dtype: mx.Dtype, n_threads: int
     ) -> int:
+        """Validate execution options and normalize unsupported thread settings."""
         if dtype not in (mx.float32, mx.float64):
             raise RuntimeError(f"unsupported dtype {dtype}")
         if dtype == mx.float64 and device != mx.cpu:
@@ -253,6 +261,7 @@ class QedCoef:
         device: mx.DeviceType,
         n_threads: int,
     ) -> float:
+        """Evaluate a reduction kernel over pool of MLX streams."""
         if n_threads <= 1:
             return kernel(0, n_items).item()
 
@@ -285,6 +294,7 @@ class QedCoef:
         device: mx.DeviceType,
         n_threads: int,
     ) -> float:
+        """Evaluate the rest-frame lattice sum for the given j and eta."""
         n_norm = self._grid.n_norm
         j_mx = mx.array(j, dtype=dtype)
         eta_mx = mx.array(eta, dtype=dtype)
@@ -306,6 +316,7 @@ class QedCoef:
         device: mx.DeviceType,
         n_threads: int,
     ) -> float:
+        """Evaluate the residual sum `c_j(v) - A(v) c_j(0)`."""
         n_norm = self._grid.n_norm
         n_hat = self._grid.n_hat
         v_dtype = np.float64 if dtype == mx.float64 else np.float32
@@ -388,11 +399,14 @@ class QedCoef:
         device: mx.DeviceType,
         dtype: mx.Dtype = mx.float32,
         n_threads: int = 1,
+        autotune_residual: float = QED_DEFAULT_ERROR,
     ) -> float:
-        """Compute `c_j(v)`"""
+        """Compute the finite-volume coefficient c_j(v) for the given parameters."""
         n_threads = self._validate_execution_options(device, dtype, n_threads)
         if par is None:
-            par = self.tune(j, v, device=device, dtype=dtype)
+            par = self.tune(
+                j, v, autotune_residual, device=device, dtype=dtype, n_threads=n_threads
+            )
 
         with mx.stream(mx.Device(device)):
             beta = self._v_fp64(v)

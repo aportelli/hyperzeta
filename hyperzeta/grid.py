@@ -2,6 +2,8 @@ import mlx.core as mx
 
 
 class Grid:
+    """Hypercubic lattice points with norms and directions."""
+
     _n_min: int = -1
     _n_max: int = -1
     _nd: int = -1
@@ -13,6 +15,7 @@ class Grid:
 
     @property
     def nd(self) -> int:
+        """Lattice number of dimensions."""
         return self._nd
 
     @nd.setter
@@ -23,6 +26,7 @@ class Grid:
 
     @property
     def n_min(self) -> int:
+        """Minimum lattice component magnitude in the lattice."""
         return self._n_min
 
     @n_min.setter
@@ -33,6 +37,7 @@ class Grid:
 
     @property
     def n_max(self) -> int:
+        """Maximum lattice component magnitude in the lattice."""
         return self._n_max
 
     @n_max.setter
@@ -43,6 +48,7 @@ class Grid:
 
     @property
     def dtype(self) -> mx.Dtype:
+        """dtype used for cached lattice arrays."""
         return self._dtype
 
     @dtype.setter
@@ -53,14 +59,17 @@ class Grid:
 
     @property
     def grid(self) -> mx.array:
+        """Lattice points."""
         return self._grid
 
     @property
     def n_norm(self) -> mx.array:
+        """Norms of the lattice points."""
         return self._n_norm
 
     @property
     def n_hat(self) -> mx.array:
+        """Directions of the lattice points."""
         return self._n_hat
 
     def __init__(
@@ -80,6 +89,7 @@ class Grid:
         self._make_grid()
 
     def _make_grid(self) -> None:
+        """Rebuild lattice points, norms, and directions."""
         if self.n_min < 0:
             raise ValueError(f"n_min must be larger than 0 (got {self.n_min})")
         if self.n_min > self.n_max:
