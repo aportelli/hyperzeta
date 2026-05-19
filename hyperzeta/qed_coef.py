@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional
 import mlx.core as mx
 import numpy as np
 from numpy.typing import ArrayLike
-from scipy.integrate import quad
+from scipy.integrate import quad, tplquad
 
 from hyperzeta.grid import Grid
 
@@ -14,6 +14,9 @@ QED_DEFAULT_ERROR: float = 1.0e-4
 QED_DEFAULT_ETAINVSTEP: float = 0.1
 QED_DEFAULT_NMAXSTEP: int = 5
 QED_DEFAULT_MAX_NMAX: int = 200
+QED_DEFAULT_J3_EPS: float = 1.0e-3
+_QED_Q3_REST: float = -0.7302886099374888
+_QED_REF_TRESHOLD = -0.1
 
 
 def ak(k: float, v: float) -> float:
@@ -58,6 +61,21 @@ def _rbarj(j: float) -> float:
     return result
 
 
+def _q3(v: ArrayLike = np.zeros(3), cut: float = 40) -> float:
+    """Compute the integral `Q_3(v)` [2, Eq. (A31)]"""
+
+    def f(theta: float, phi: float, r: float) -> float:
+        n_hat = np.array(
+            [np.cos(phi) * np.sin(theta), np.sin(phi) * np.sin(theta), np.cos(theta)]
+        )
+        d = 1 / (1 - np.dot(n_hat, v))
+        t = np.tanh(np.sinh(r * d ** (-1 / 5))) ** 5
+        return np.sin(theta) * t * d / r
+
+    i = tplquad(f, 0, cut, 0, 2 * np.pi, 0, np.pi)
+    return i[0] - 4 * np.pi * ak(1, np.sqrt(np.dot(v, v))) * np.log(cut)
+
+
 @dataclass
 class AccelerationParameters:
     """Acceleration parameters controlling the regulator and momentum lattice cutoff."""
@@ -83,6 +101,7 @@ class QedCoef:
     _last_dtype: Optional[mx.Dtype] = None
     _rj: float
     _rbarj: float
+    _q3_cache: Dict[str, float] = {}
     _rest_cj: float
     _streams: Dict[mx.DeviceType, List[mx.Stream]]
 
@@ -146,12 +165,12 @@ class QedCoef:
 
         # refresh R_j and Rbar_j if j changed
         if refresh_j:
-            if j > 3.0:
+            if j > 3.0 + QED_DEFAULT_J3_EPS:
                 self._rj = 0.0
                 self._rbarj = _rbarj(j)
-            elif j < 3.0:
+            elif j < 3.0 - QED_DEFAULT_J3_EPS:
                 self._rj = _rj(j)
-                if j < 0.0:
+                if j < _QED_REF_TRESHOLD:
                     self._rbarj = _rbarj(3.0 - j)
                 else:
                     self._rbarj = 0.0
@@ -182,8 +201,8 @@ class QedCoef:
     ) -> float:
         """Compute the cached rest-frame coefficient `c_j(0)` for the current settings."""
         with mx.stream(mx.Device(device)):
-            # use more stable reflection formula [1, Eq. (70)] for j < 0
-            if j < 0.0:
+            # use more stable reflection formula [1, Eq. (70)] for j < _QED_REF_TRESHOLD
+            if j < _QED_REF_TRESHOLD:
                 jp = 3.0 - j
                 s0 = self._eval_rest_sum(
                     jp,
@@ -195,7 +214,7 @@ class QedCoef:
                 c0p = s0 + 4.0 * math.pi * eta ** (jp - 3.0) * self._rbarj
                 return self._reflect_cj(j, c0p)
             # use [2, Eq. (A25)] for j < 3
-            elif j < 3.0:
+            elif j < 3.0 - QED_DEFAULT_J3_EPS:
                 s0 = self._eval_rest_sum(
                     j,
                     eta,
@@ -205,7 +224,7 @@ class QedCoef:
                 )
                 return s0 - 4.0 * math.pi * eta ** (j - 3.0) * self._rj
             # use [2, Eq. (A33)] for j > 3
-            elif j > 3.0:
+            elif j > 3.0 + QED_DEFAULT_J3_EPS:
                 s0 = self._eval_rest_sum(
                     j,
                     eta,
@@ -215,7 +234,14 @@ class QedCoef:
                 )
                 return s0 + 4.0 * math.pi * eta ** (j - 3.0) * self._rbarj
             else:
-                raise RuntimeError("not implemented")
+                s0 = self._eval_rest_sum(
+                    j,
+                    eta,
+                    dtype=dtype,
+                    device=device,
+                    n_threads=n_threads,
+                )
+                return s0 + 4.0 * math.pi * np.log(eta) + _QED_Q3_REST
 
     @staticmethod
     def _reflect_cj(j: float, c_3_minus_j: float) -> float:
@@ -426,6 +452,7 @@ class QedCoef:
             if beta == 0.0:
                 s = 0.0
                 a = 1.0
+                dq3 = 0.0
             else:
                 # compute A_{5/(j+2)}(|v|)
                 k = 5.0 / (j + 2.0)
@@ -434,7 +461,12 @@ class QedCoef:
                 s = self._eval_residual_sum(
                     v, j, par.eta, a, dtype=dtype, device=device, n_threads=n_threads
                 )
-            if j != 3.0:
-                return s + a * self._rest_cj
-            else:
-                raise RuntimeError("not implemented")
+                # compute residual Q_3 if needed
+                if np.abs(j - 3.0) < QED_DEFAULT_J3_EPS:
+                    vs = f"{v}"
+                    if vs not in self._q3_cache:
+                        self._q3_cache[vs] = _q3(v)
+                    dq3 = self._q3_cache[vs] - a * _QED_Q3_REST
+                else:
+                    dq3 = 0.0
+            return s + a * self._rest_cj + dq3

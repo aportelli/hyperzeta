@@ -9,7 +9,7 @@ from hyperzeta import AccelerationParameters, QedCoef
 @dataclass(frozen=True)
 class CoefCase:
     j: float
-    v: tuple[float, float, float]
+    v: tuple[float, ...]
     residual: float
     expected: float
 
@@ -17,7 +17,7 @@ class CoefCase:
 @dataclass(frozen=True)
 class FixedCoefCase:
     j: float
-    v: tuple[float, float, float]
+    v: tuple[float, ...]
     par: AccelerationParameters
     expected: float
 
@@ -33,6 +33,9 @@ CASES = [
     CoefCase(j=5.0, v=(0.0, 0.0, 0.0), residual=1.0e-8, expected=10.3775248),
     CoefCase(j=2.0, v=(0.9, 0.0, 0.0), residual=1.0e-8, expected=-10.795283),
     CoefCase(j=0.0, v=(0.4, 0.9, 0.1), residual=1.0e-8, expected=-16.159134),
+    CoefCase(j=3.0, v=(0.0, 0.0, 0.0), residual=1.0e-8, expected=3.8219235),
+    CoefCase(j=3.0, v=(0.2713834, 0.0, 0.0), residual=1.0e-8, expected=3.9238834),
+    CoefCase(j=3.0, v=(0.15668327,) * 3, residual=1.0e-8, expected=3.9176440),
 ]
 
 CPU_FIXED_CASES = [
