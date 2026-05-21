@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["matplotlib>=3.10.9", "mlx>=0.31.2", "scipy>=1.17.1"]
+dependencies = [
+    "matplotlib>=3.10.9",
+    "mlx>=0.31.2",
+    "pyvista[jupyter]>=0.48.4",
+    "scipy>=1.17.1",
+]
 
 [build-system]
 requires = ["uv_build>=0.8.4,<0.9.0"]
