@@ -65,9 +65,11 @@ def _q3(v: ArrayLike = np.zeros(3), cut: float = 40) -> float:
     """Compute the integral `Q_3(v)` [2, Eq. (A31)]"""
 
     def f(theta: float, phi: float, r: float) -> float:
-        n_hat = np.array(
-            [np.cos(phi) * np.sin(theta), np.sin(phi) * np.sin(theta), np.cos(theta)]
-        )
+        n_hat = np.array([
+            np.cos(phi) * np.sin(theta),
+            np.sin(phi) * np.sin(theta),
+            np.cos(theta),
+        ])
         d = 1 / (1 - np.dot(n_hat, v))
         t = np.tanh(np.sinh(r * d ** (-1 / 5))) ** 5
         return np.sin(theta) * t * d / r
@@ -342,7 +344,7 @@ class QedCoef:
         device: mx.DeviceType,
         n_threads: int,
     ) -> float:
-        """Evaluate the residual sum `c_j(v) - A(v) c_j(0)`."""
+        """Evaluate the residual sum (cf. notes)."""
         n_norm = self._grid.n_norm
         n_hat = self._grid.n_hat
         v_dtype = np.float64 if dtype == mx.float64 else np.float32
@@ -448,7 +450,7 @@ class QedCoef:
                 j, par.eta, par.n_max, dtype=dtype, device=device, n_threads=n_threads
             )
 
-            # compute c_j(v) - c_j(0) if required
+            # compute residual sum if required
             if beta == 0.0:
                 s = 0.0
                 a = 1.0
