@@ -3,19 +3,24 @@ The implementation in HyperZeta follows Sec. A.4 of [[2]](#2), and this note doc
 
 ## Erratum Eq. (A24)
 Eq. (A24) in [[2]](#2) has the wrong sign in the exponent of the argument of the $\sinh$ function. The correct equation is
+
 $$
 f(\mathbf{n})=1-\left(\tanh\{\sinh[|\mathbf{n}|d(\hat{\mathbf{n}};\{\mathbf{v}\})^{-\frac{1}{j+2}}]\}\right)^{j+2}\,.
 $$
+
 This can be validated by comparing to [[1]](#1) Eq. (B3).
 
 ## UV-improved convergence of boosted sums
 In the $j\neq 3$ case, the summand for the boosted coefficient
 $c_j(\mathbf{v})$ is
+
 $$
 S(\mathbf{n},\mathbf{v})=
 \frac{f(\eta\mathbf{n})}{|\mathbf{n}|^j(1-\mathbf{v}\cdot\hat{\mathbf{n}})}\,,
 $$
+
 and its integral over $\mathbf{n}$ is given by
+
 $$
 \int\mathrm{d}^3\mathbf{n}\,S(\mathbf{n},\mathbf{v})=\int\mathrm{d}^3\mathbf{n}\,\frac{1-\tanh[\sinh(\eta|\mathbf{n}|)]^{j+2}}{|\mathbf{n}|^j(1-\mathbf{v}\cdot\hat{\mathbf{n}})^{\frac{5}{j+2}}}\,,
 $$
