@@ -202,48 +202,47 @@ class QedCoef:
         n_threads: int,
     ) -> float:
         """Compute the cached rest-frame coefficient `c_j(0)` for the current settings."""
-        with mx.stream(mx.Device(device)):
-            # use more stable reflection formula [1, Eq. (70)] for j < _QED_REF_TRESHOLD
-            if j < _QED_REF_TRESHOLD:
-                jp = 3.0 - j
-                s0 = self._eval_rest_sum(
-                    jp,
-                    eta,
-                    dtype=dtype,
-                    device=device,
-                    n_threads=n_threads,
-                )
-                c0p = s0 + 4.0 * math.pi * eta ** (jp - 3.0) * self._rbarj
-                return self._reflect_cj(j, c0p)
-            # use [2, Eq. (A25)] for j < 3
-            elif j < 3.0 - QED_DEFAULT_J3_EPS:
-                s0 = self._eval_rest_sum(
-                    j,
-                    eta,
-                    dtype=dtype,
-                    device=device,
-                    n_threads=n_threads,
-                )
-                return s0 - 4.0 * math.pi * eta ** (j - 3.0) * self._rj
-            # use [2, Eq. (A33)] for j > 3
-            elif j > 3.0 + QED_DEFAULT_J3_EPS:
-                s0 = self._eval_rest_sum(
-                    j,
-                    eta,
-                    dtype=dtype,
-                    device=device,
-                    n_threads=n_threads,
-                )
-                return s0 + 4.0 * math.pi * eta ** (j - 3.0) * self._rbarj
-            else:
-                s0 = self._eval_rest_sum(
-                    j,
-                    eta,
-                    dtype=dtype,
-                    device=device,
-                    n_threads=n_threads,
-                )
-                return s0 + 4.0 * math.pi * np.log(eta) + _QED_Q3_REST
+        # use more stable reflection formula [1, Eq. (70)] for j < _QED_REF_TRESHOLD
+        if j < _QED_REF_TRESHOLD:
+            jp = 3.0 - j
+            s0 = self._eval_rest_sum(
+                jp,
+                eta,
+                dtype=dtype,
+                device=device,
+                n_threads=n_threads,
+            )
+            c0p = s0 + 4.0 * math.pi * eta ** (jp - 3.0) * self._rbarj
+            return self._reflect_cj(j, c0p)
+        # use [2, Eq. (A25)] for j < 3
+        elif j < 3.0 - QED_DEFAULT_J3_EPS:
+            s0 = self._eval_rest_sum(
+                j,
+                eta,
+                dtype=dtype,
+                device=device,
+                n_threads=n_threads,
+            )
+            return s0 - 4.0 * math.pi * eta ** (j - 3.0) * self._rj
+        # use [2, Eq. (A33)] for j > 3
+        elif j > 3.0 + QED_DEFAULT_J3_EPS:
+            s0 = self._eval_rest_sum(
+                j,
+                eta,
+                dtype=dtype,
+                device=device,
+                n_threads=n_threads,
+            )
+            return s0 + 4.0 * math.pi * eta ** (j - 3.0) * self._rbarj
+        else:
+            s0 = self._eval_rest_sum(
+                j,
+                eta,
+                dtype=dtype,
+                device=device,
+                n_threads=n_threads,
+            )
+            return s0 + 4.0 * math.pi * np.log(eta) + _QED_Q3_REST
 
     @staticmethod
     def _reflect_cj(j: float, c_3_minus_j: float) -> float:
