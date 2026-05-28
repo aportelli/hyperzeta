@@ -8,7 +8,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 from scipy.integrate import quad, tplquad
 
-from hyperzeta.grid import Grid
+from hyperzeta.lattice import Lattice
 
 QED_DEFAULT_ERROR: float = 1.0e-4
 QED_DEFAULT_ETAINVSTEP: float = 0.1
@@ -96,7 +96,7 @@ class QedCoef:
     [2]: [Di Carlo et al., PRD 105(7), 074509 (2022)](https://journals.aps.org/prd/abstract/10.1103/PhysRevD.105.074509)
     """
 
-    _grid: Grid
+    _lattice: Lattice
     _last_j: Optional[float] = None
     _last_eta: Optional[float] = None
     _last_n_max: Optional[int] = None
@@ -110,7 +110,7 @@ class QedCoef:
     log: bool = False
 
     def __init__(self) -> None:
-        self._grid = Grid(no_zero=True, dtype=mx.float32)
+        self._lattice = Lattice(no_zero=True, dtype=mx.float32)
         self._streams = {}
 
     @staticmethod
@@ -323,7 +323,7 @@ class QedCoef:
         n_threads: int,
     ) -> float:
         """Evaluate the rest-frame lattice sum for the given j and eta."""
-        n_norm = self._grid.n_norm
+        n_norm = self._lattice.n_norm
         j_mx = mx.array(j, dtype=dtype)
         eta_mx = mx.array(eta, dtype=dtype)
         return self._eval_chunked(
@@ -345,8 +345,8 @@ class QedCoef:
         n_threads: int,
     ) -> float:
         """Evaluate the residual sum (cf. notes)."""
-        n_norm = self._grid.n_norm
-        n_hat = self._grid.n_hat
+        n_norm = self._lattice.n_norm
+        n_hat = self._lattice.n_hat
         v_dtype = np.float64 if dtype == mx.float64 else np.float32
         v = mx.array(np.asarray(v_raw, dtype=v_dtype), dtype=dtype)
         j_mx = mx.array(j, dtype=dtype)
@@ -442,8 +442,8 @@ class QedCoef:
                 raise ValueError(f"|v| must satisfy 0 <= |v| < 1 (got {beta})")
 
             # set the momentum lattice
-            self._grid.dtype = dtype
-            self._grid.n_max = par.n_max
+            self._lattice.dtype = dtype
+            self._lattice.n_max = par.n_max
 
             # compute & cache R_j, Rbar_j, and c_j(0) as needed
             self._refresh_cache(
