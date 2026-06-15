@@ -113,6 +113,16 @@ class Lattice:
         nd: int = 3,
         dtype: mx.Dtype = mx.float32,
     ) -> None:
+        """
+        Lattice of vectors n_1 * b_1 + ... + n_d * b_d with n in Z^d and b_i a basis of R^d.
+
+        - `nd`: number of dimensions d
+        - `n_min`: minimum value of the coordinates n_i
+        - `n_max`: maximum value of the coordinates n_i
+        - `no_zero`: exclude the zero size (i.e. n = [0, ..., 0])
+        - `basis`: basis (d,d) matrix, column i is the basis vector b_i
+        - `dtype`: MLX dtype lattice points
+        """
         self._nd = nd
         self._n_min = n_min
         self._n_max = n_max
@@ -128,7 +138,7 @@ class Lattice:
             self._covolume = float(
                 np.linalg.det(np.array(self._basis, dtype=np.float64))
             )
-            self._gram = self.basis @ self.basis.T
+            self._gram = self.basis.T @ self.basis
         else:
             self._covolume = 1.0
             self._gram = mx.eye(self.nd, dtype=self.dtype)
