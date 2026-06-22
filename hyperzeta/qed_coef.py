@@ -1,7 +1,7 @@
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Dict, Optional
 
 import mlx.core as mx
 import numpy as np
@@ -9,6 +9,7 @@ from numpy.typing import ArrayLike
 from scipy.integrate import quad, tplquad
 
 from hyperzeta.lattice import Lattice
+from hyperzeta.stream_array import StreamArray
 
 QED_DEFAULT_ERROR: float = 1.0e-4
 QED_DEFAULT_ETAINVSTEP: float = 0.1
@@ -105,13 +106,13 @@ class QedCoef:
     _rbarj: float
     _q3_cache: Dict[str, float] = {}
     _rest_cj: float
-    _streams: Dict[mx.DeviceType, List[mx.Stream]]
+    _stream_array: StreamArray
 
     log: bool = False
 
     def __init__(self) -> None:
         self._lattice = Lattice(no_zero=True, dtype=mx.float32)
-        self._streams = {}
+        self._stream_array = StreamArray()
 
     @staticmethod
     @mx.compile
@@ -280,38 +281,6 @@ class QedCoef:
             return 1
         return n_threads
 
-    def _eval_chunked(
-        self,
-        n_items: int,
-        kernel: Callable[[int, int], mx.array],
-        *,
-        device: mx.DeviceType,
-        n_threads: int,
-    ) -> float:
-        """Evaluate a reduction kernel over pool of MLX streams."""
-        if n_threads <= 1:
-            return kernel(0, n_items).item()
-
-        step = math.ceil(n_items / n_threads)
-        chunks = [(i, min(i + step, n_items)) for i in range(0, n_items, step)]
-        streams = self._streams.setdefault(device, [])
-        dev = mx.Device(device)
-        while len(streams) < len(chunks):
-            streams.append(mx.new_stream(dev))
-        streams = streams[: len(chunks)]
-        partials = []
-
-        for stream, (lo, hi) in zip(streams, chunks):
-            with mx.stream(stream):
-                part = kernel(lo, hi)
-                mx.async_eval(part)
-                partials.append(part)
-
-        for stream in streams:
-            mx.synchronize(stream)
-
-        return sum(part.item() for part in partials)
-
     def _eval_rest_sum(
         self,
         j: float,
@@ -323,13 +292,14 @@ class QedCoef:
     ) -> float:
         """Evaluate the rest-frame lattice sum for the given j and eta."""
         n_norm = self._lattice.n_norm
+        n_pts = n_norm.shape[0]
         j_mx = mx.array(j, dtype=dtype)
         eta_mx = mx.array(eta, dtype=dtype)
-        return self._eval_chunked(
-            n_norm.shape[0],
+        return self._stream_array.chunked_reduction(
             lambda lo, hi: self._sum_kernel_rest(n_norm[lo:hi], j_mx, eta_mx),
-            device=device,
+            n_pts,
             n_threads=n_threads,
+            device=device,
         )
 
     def _eval_residual_sum(
@@ -346,18 +316,19 @@ class QedCoef:
         """Evaluate the residual sum (cf. notes)."""
         n_norm = self._lattice.n_norm
         n_hat = self._lattice.n_hat
+        n_pts = n_norm.shape[0]
         v_dtype = np.float64 if dtype == mx.float64 else np.float32
         v = mx.array(np.asarray(v_raw, dtype=v_dtype), dtype=dtype)
         j_mx = mx.array(j, dtype=dtype)
         eta_mx = mx.array(eta, dtype=dtype)
         a_mx = mx.array(a, dtype=v.dtype)
-        return self._eval_chunked(
-            n_norm.shape[0],
+        return self._stream_array.chunked_reduction(
             lambda lo, hi: self._residual_kernel(
                 n_norm[lo:hi], n_hat[lo:hi], v, j_mx, eta_mx, a_mx
             ),
-            device=device,
+            n_pts,
             n_threads=n_threads,
+            device=device,
         )
 
     def tune(
